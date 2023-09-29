@@ -16,20 +16,12 @@ do {
 $HostURL = Read-Host "`nEnter URL for Request"
 
 # Create temporary files to use for reading the Key creating info from and generating the csr into
-[String]$CSRPath = "c:\Temp\$($SubjectNameCN)_.csr"
-[String]$INFPath = "c:\Temp\$($SubjectNameCN)_.inf"
+[String]$CSRPath = ".\$($SubjectNameCN)_.csr"
+[String]$INFPath = ".\$($SubjectNameCN)_.inf"
 
-# Pretty Print XML when the API requests pull it
-function Format-XML {
-    [CmdletBinding()]
-    Param ([Parameter(ValueFromPipeline=$true,Mandatory=$true)][string]$xmlcontent)
-    $xmldoc = New-Object -TypeName System.Xml.XmlDocument
-    $xmldoc.LoadXml($xmlcontent)
-    $sw = New-Object System.IO.StringWriter
-    $writer = New-Object System.Xml.XmlTextwriter($sw)
-    $writer.Formatting = [System.XML.Formatting]::Indented
-    $xmldoc.WriteContentTo($writer)
-    $sw.ToString()
+$headers = @{
+    "Accept"="application/json"
+    "Content-Type"="application/json"
 }
 
 # I am using the old version of Powershell that ships with Windows.  This is used to skip authentication on the server.
@@ -70,8 +62,7 @@ RequestType = PKCS10                            ; Can be CMC, PKCS10, PKCS7 or C
 # Write INF to file so that the certreq command can read it in
 $INF | out-file -filepath $INFPath -force
 
-
-# Generate request
+# Generate request, remove newlines to make the JSON consumable
 Write-Output "Generating CSR for $SubjectNameCN"
 certreq -new $INFPath $CSRPath
 $CertReqData = Get-Content -Raw -Path $CSRPath
@@ -188,7 +179,7 @@ $JSONBody =
                         "DefaultValue" : null,
                         "Description" : "Requestor Name",
                         "Syntax" : "string"
-                }
+                    }
                 },
                 {
                     "Value" : null,
@@ -198,7 +189,7 @@ $JSONBody =
                         "DefaultValue" : null,
                         "Description" : "Requestor Email",
                         "Syntax" : "string"
-                }
+                    }
                 },
                 {
                     "Value" : null,
@@ -217,10 +208,41 @@ $JSONBody =
 "@
 
 # Submit to the CA with the JSON body above, put the output through the formatter and print the xml returned.
-$ReturnedData = Invoke-RestMethod -Uri "https://$HostURL/ca/rest/certrequests" -Method Post -ContentType "application/json" -Body $JSONBody
-$FormattedXML = $ReturnedData.InnerXml | Format-XML
-Write-Output $FormattedXML
+$ReturnedData = Invoke-RestMethod -Uri "https://$HostURL/ca/rest/certrequests" -Method Post -Headers $headers -Body $JSONBody
+$RequestNumber
+if ($ReturnedData.entries)
+{
+    Write-Output $ReturnedData.entries
+    $RequestNumber = $ReturnedData.entries.requestURL.Split("/")[-1]
+}
 
+# Auto Cancel /ca/rest/agent/certrequests/{id}/cancel
+$AccessCert = Get-PfxCertificate -FilePath "C:\Users\hrich\Documents\native_windows\sw75.ra.p12"
+$CancelURL = "https://10.250.6.49/ca/rest/agent/certrequests/$RequestNumber/approve"
+$ReviewURL = "https://10.250.6.49/ca/rest/agent/certrequests/$RequestNumber"
+$ReviewData = Invoke-RestMethod -Uri $ReviewURL -Certificate $AccessCert -SessionVariable sesh -Headers $headers
+$RequestType = $ReviewData.requestType
+$RequestID = $ReviewData.requestID
+$Status = $ReviewData.requestStatus
+$ProfileName = $ReviewData.profileName
+$ProfileID = $ReviewData.profileID
+Write-Output "Request Type: $RequestType`nRequest ID: $RequestID`nRequest Status: $Status`nProfile Name: $ProfileName`nProfile ID: $ProfileID"
+Write-Output $ReviewData.Input.Attribute
+$ConvertedToJSON = $ReviewData | ConvertTo-Json -Depth 12
+Write-Output "Approving Reqest ID: $RequestNumber"
+$ConfirmApproval = Read-Host "Are you sure you want to approve this request? ([Y]es/[N]o)"
+if ($ConfirmApproval -match "y[e]*[s]*$") {
+    Invoke-RestMethod -Uri $CancelURL -Method Post -Body $ConvertedToJSON -Certificate $AccessCert -WebSession $sesh
+
+    $ReviewData = Invoke-RestMethod -Uri $ReviewURL -Certificate $AccessCert -Headers $headers
+    $RequestID = $ReviewData.requestID
+    $Status = $ReviewData.requestStatus
+    if ($Status -match "complete") {
+        Write-Output "Request Complete!`nRequest ID: $RequestID`nRequest Status: $Status"
+    } else {
+        Write-Output "Request Not Complete...`nRequest ID: $RequestID`nRequest Status: $Status"
+    }
+}
 # Cleanup of Temp Files
 Remove-Item -Path $CSRPath
 Remove-Item -Path $INFPath

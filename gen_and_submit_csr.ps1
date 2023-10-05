@@ -1,5 +1,5 @@
 # Gather subject name to be used for request
-[String]$SubjectNameCN = Read-Host "`nEnter Subject Name CN"
+[String]$SubjectNameCN = Read-Host "`nEnter Subject Name CN for the new certificate"
 
 # List and sanitize input for CC/S/A since it is a dropdown in the form and should match what is available
 $CCSAOptions = [String[]]("AFIS", "CCEB", "CENTCOM", "CIA", "CONTRACTOR", "DARPA", "DCAA", "DCMA", "DFAS", "DHS", "DIA", "DISA", "DLA",
@@ -13,30 +13,38 @@ do {
 } until ($CCSAOptions.Contains($CCSA))
 
 # Enter the host to send the request to
-$HostURL = Read-Host "`nEnter URL for Request"
+$EEHost = Read-Host "`nEnter URL for the Request i.e. ee-sw-ca-75.c3pki.nit.disa.mil"
+$AgentHost = $EEHost.Replace("ee", "agent")
+
+$ProfileToRun = "caAltTokenCertCSR"
+
+#$AccessCert = Get-PfxCertificate -FilePath ".\RA.Rich.Homer.p12"
 
 # Create temporary files to use for reading the Key creating info from and generating the csr into
 [String]$CSRPath = ".\$($SubjectNameCN)_.csr"
 [String]$INFPath = ".\$($SubjectNameCN)_.inf"
+[String]$CertDataPath = ".\$($SubjectNameCN)_$($CCSA).cer"
 
+# Headers to pass into each call, that way JSON is sent back.
 $headers = @{
     "Accept"="application/json"
     "Content-Type"="application/json"
 }
 
-# I am using the old version of Powershell that ships with Windows.  This is used to skip authentication on the server.
-add-type @"
-using System.Net;
-using System.Security.Cryptography.X509Certificates;
-public class TrustAllCertsPolicy : ICertificatePolicy {
-    public bool CheckValidationResult(
-        ServicePoint srvPoint, X509Certificate certificate,
-        WebRequest request, int certificateProblem) {
-            return true;
-        }
- }
-"@
-[System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
+$PotentialCerts = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.HasPrivateKey -and $_.Issuer -match "DOD*"}
+$PotentialCerts | Format-Table -Property Thumbprint, Subject
+$RAThumbprint = Read-Host "Copy and paste your RA thumbprint here from the above table"
+$RACertificate = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.HasPrivateKey -and $_.Thumbprint -eq $RAThumbprint }
+
+$TestAuthURI = "https://$AgentHost/ca/rest/agent/certrequests"
+Write-Output "`nAttempting connection to $TestAuthURI`nwith RA: $($RACertificate.Subject)"
+try {
+    Invoke-RestMethod -Uri $TestAuthURI -Certificate $RACertificate -Headers $headers | Out-Null
+} catch {
+    "`nError Occurred while attempting to use your RA token...Exiting"
+    Exit
+}
+Write-Output "`nConnection Successful!"
 
 # This is the setup file for creating the request
 $INF = 
@@ -68,181 +76,71 @@ certreq -new $INFPath $CSRPath
 $CertReqData = Get-Content -Raw -Path $CSRPath
 $CertReqDataNoNewlines = $CertReqData.Replace("`r`n", "")
 
-# This is the JSONBody used in the POST data.  There are some live substitutions of variables in here, like the CSR and the subjectname
-$JSONBody = 
-@"
-{
-    "Attributes": {
-        "Attribute": []
-    },
-    "ProfileID" : "caAltTokenCertCSR",
-    "renewal" : false,
-    "Input" : [
-        {
-            "id" : "i1",
-            "ClassID" : "keyGenInputImpl",
-            "Name" : "Key Generation",
-            "Text" : null,
-            "Attribute" : [
-                {
-                    "name" : "cert_request_type",
-                    "Value" : "pkcs10",
-                    "Descriptor" : {
-                        "Constraint" : null,
-                        "DefaultValue" : null,
-                        "Description" : "Key Generation Request Type",
-                        "Syntax" : "keygen_request_type"
-                    }
-                },
-                {
-                    "name" : "cert_request",
-                    "Value" : "$CertReqDataNoNewlines",
-                    "Descriptor" : {
-                        "Constraint" : null,
-                        "DefaultValue" : null,
-                        "Description" : "Key Generation Request",
-                        "Syntax" : "keygen_request"
-                    }
-                }
-            ]
-        },
-        {
-            "id" : "i2",
-            "ClassID" : "AltTokenSubjectNameInputImpl",
-            "ConfigAttribute" : [],
-            "Name" : "Subject Name",
-            "Text" : null,
-            "Attribute" : [
-                {
-                    "Value" : "$SubjectNameCN",
-                    "name" : "subjectname_cn",
-                    "Descriptor" : {
-                        "Constraint" : null,
-                        "DefaultValue" : null,
-                        "Description" : "Subject Name CN",
-                        "Syntax" : "string"
-                    }
-                },
-                {
-                    "Value" : "$CCSA",
-                    "name" : "subjectname_ccsa",
-                    "Descriptor" : {
-                        "Constraint" : null,
-                        "DefaultValue" : null,
-                        "Description" : "CC/S/A",
-                        "Syntax" : "string"
-                    }
-                },
-                {
-                    "Value" : null,
-                    "name" : "owner_cn",
-                    "Descriptor" : {
-                        "Constraint" : null,
-                        "DefaultValue" : null,
-                        "Description" : "CAC CN (required only if different from Subject Name)",
-                        "Syntax" : "string"
-                    }
-                }
-            ]
-        },
-        {
-            "id" : "i3",
-            "ClassID" : "AltTokenSubjectAltNameInputImpl",
-            "ConfigAttribute" : [],
-            "Name" : "Subject Alternative Name",
-            "Text" : null,
-            "Attribute" : [
-                {
-                    "Value" : null,
-                    "name" : "principal_name",
-                    "Descriptor" : {
-                        "Constraint" : null,
-                        "DefaultValue" : null,
-                        "Description" : "UPN",
-                        "Syntax" : "string"
-                    }
-                }
-            ]
-        },
-        {
-            "id" : "i4",
-            "ClassID" : "submitterInfoInputImpl",
-            "ConfigAttribute" : [],
-            "Name" : "Requestor Information",
-            "Text" : null,
-            "Attribute" : [
-                {
-                    "Value" : null,
-                    "name" : "requestor_name",
-                    "Descriptor" : {
-                        "Constraint" : null,
-                        "DefaultValue" : null,
-                        "Description" : "Requestor Name",
-                        "Syntax" : "string"
-                    }
-                },
-                {
-                    "Value" : null,
-                    "name" : "requestor_email",
-                    "Descriptor" : {
-                        "Constraint" : null,
-                        "DefaultValue" : null,
-                        "Description" : "Requestor Email",
-                        "Syntax" : "string"
-                    }
-                },
-                {
-                    "Value" : null,
-                    "name" : "requestor_phone",
-                    "Descriptor" : {
-                        "Constraint" : null,
-                        "DefaultValue" : null,
-                        "Description" : "Requestor Phone",
-                        "Syntax" : "string"
-                    }
-                }
-            ]
-        }
-    ]
-}
-"@
+# Retrieve the JSON value of the profile, and edit the values needed for submitting it to the portal.
+$RetrieveProfileJSON = "https://$EEHost/ca/rest/certrequests/profiles/$ProfileToRun"
+$BaseJSONProfile = Invoke-RestMethod -Uri $RetrieveProfileJSON -Headers $headers
+# These are edits to the profile before submitting
+($BaseJSONProfile.Input[0].Attribute | Where-Object{$_.name -eq "cert_request_type"}).Value = "pkcs10"
+($BaseJSONProfile.Input[0].Attribute | Where-Object{$_.name -eq "cert_request"}).Value = "$CertReqDataNoNewlines"
+($BaseJSONProfile.Input[1].Attribute | Where-Object{$_.name -eq "subjectname_cn"}).Value = "$SubjectNameCN"
+($BaseJSONProfile.Input[1].Attribute | Where-Object{$_.name -eq "subjectname_ccsa"}).Value = "$CCSA"
+# Conversion to a String that is friendly enough to submit to the CA as a Body, default conversion is depth 2
+$JSONString =  $BaseJSONProfile | ConvertTo-Json -Depth 12 
 
 # Submit to the CA with the JSON body above, put the output through the formatter and print the xml returned.
-$ReturnedData = Invoke-RestMethod -Uri "https://$HostURL/ca/rest/certrequests" -Method Post -Headers $headers -Body $JSONBody
+$ReturnedData = Invoke-RestMethod -Uri "https://$EEHost/ca/rest/certrequests" -Method Post -Headers $headers -Body $JSONString
 $RequestNumber
 if ($ReturnedData.entries)
 {
-    Write-Output $ReturnedData.entries
+    Write-Output "Request Submitted! Now Pending Approval"
+    Write-Output $ReturnedData.entries.CertReqInput
     $RequestNumber = $ReturnedData.entries.requestURL.Split("/")[-1]
 }
 
-# Auto Cancel /ca/rest/agent/certrequests/{id}/cancel
-$AccessCert = Get-PfxCertificate -FilePath "C:\Users\hrich\Documents\native_windows\sw75.ra.p12"
-$CancelURL = "https://10.250.6.49/ca/rest/agent/certrequests/$RequestNumber/approve"
-$ReviewURL = "https://10.250.6.49/ca/rest/agent/certrequests/$RequestNumber"
-$ReviewData = Invoke-RestMethod -Uri $ReviewURL -Certificate $AccessCert -SessionVariable sesh -Headers $headers
+$ApproveURL = "https://$AgentHost/ca/rest/agent/certrequests/$RequestNumber/approve"
+$ReviewURL = "https://$AgentHost/ca/rest/agent/certrequests/$RequestNumber"
+$RetrieveURL = "https://$EEHost/ca/rest/certrequests/$RequestNumber"
+
+# This call saves the session(cookies and identifiers) in a local variable called sesh
+$ReviewData = Invoke-RestMethod -Uri $ReviewURL -Certificate $RACertificate -SessionVariable sesh -Headers $headers
 $RequestType = $ReviewData.requestType
 $RequestID = $ReviewData.requestID
 $Status = $ReviewData.requestStatus
-$ProfileName = $ReviewData.profileName
 $ProfileID = $ReviewData.profileID
-Write-Output "Request Type: $RequestType`nRequest ID: $RequestID`nRequest Status: $Status`nProfile Name: $ProfileName`nProfile ID: $ProfileID"
-Write-Output $ReviewData.Input.Attribute
+Write-Output "Request Type: $RequestType`nRequest ID: $RequestID`nRequest Status: $Status`nProfile ID: $ProfileID"
 $ConvertedToJSON = $ReviewData | ConvertTo-Json -Depth 12
-Write-Output "Approving Reqest ID: $RequestNumber"
-$ConfirmApproval = Read-Host "Are you sure you want to approve this request? ([Y]es/[N]o)"
+$ConfirmApproval = Read-Host "Do you approve this request? ([Y]es/[N]o)"
 if ($ConfirmApproval -match "y[e]*[s]*$") {
-    Invoke-RestMethod -Uri $CancelURL -Method Post -Body $ConvertedToJSON -Certificate $AccessCert -WebSession $sesh
-
-    $ReviewData = Invoke-RestMethod -Uri $ReviewURL -Certificate $AccessCert -Headers $headers
-    $RequestID = $ReviewData.requestID
+    # Reuses the session varaible from the ReviewData call above
+    Invoke-RestMethod -Uri $ApproveURL -Method Post -Body $ConvertedToJSON -Certificate $RACertificate -WebSession $sesh
+    # Call Review again to see the final status
+    $ReviewData = Invoke-RestMethod -Uri $ReviewURL -Certificate $RACertificate -Headers $headers
     $Status = $ReviewData.requestStatus
     if ($Status -match "complete") {
-        Write-Output "Request Complete!`nRequest ID: $RequestID`nRequest Status: $Status"
+        Write-Output "Request Status: $Status"
+       
+        # This retrieves the URL for the certificate from the approved request data
+        $ReturnedData = Invoke-RestMethod -Uri $RetrieveURL -Headers $headers -Certificate $RACertificate
+        if ($ReturnedData) {
+            # Now we call the certificate retrieval URL and grab the cert data, write it to a file, and accept it into CAPI
+            $CertURL = $ReturnedData.certURL
+            $ReturnedData = Invoke-RestMethod -Uri $CertURL -Headers $headers -Certificate $RACertificate
+            $CertData = $ReturnedData.Encoded
+            $CertData | out-file -filepath $CertDataPath -force
+            $ConfirmApproval = Read-Host "Would you like to install this certificate on this computer? ([Y]es/[N]o)"
+            if ($ConfirmApproval -match "y[e]*[s]*$") {
+                certreq -accept $CertDataPath
+            }
+        }
+        
     } else {
         Write-Output "Request Not Complete...`nRequest ID: $RequestID`nRequest Status: $Status"
     }
 }
+
+
 # Cleanup of Temp Files
+Write-Output "Cleaning up temporary files..."
 Remove-Item -Path $CSRPath
 Remove-Item -Path $INFPath
+Read-Host "Done.  Script is finished, press enter to exit"
